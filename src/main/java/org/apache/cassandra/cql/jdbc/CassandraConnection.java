@@ -137,11 +137,86 @@ class CassandraConnection extends AbstractConnection implements Connection
             defaultConsistencyLevel = ConsistencyLevel.valueOf(props.getProperty(TAG_CONSISTENCY_LEVEL,ConsistencyLevel.ONE.name()));
             boolean connected=false;            
             int retries=0;
-
-            hostListPrimary.add(host);
-
-            connected = tryToConnect(hostListPrimary,port,version,password,connectionRetries);
-
+            // dealing with multiple hosts passed as seeds in the JDBC URL : jdbc:cassandra://lyn4e900.tlt--lyn4e901.tlt--lyn4e902.tlt:9160/fluks
+            // in this phase we get the list of all the nodes of the cluster
+            String currentHost ="";
+            while(!connected && retries<10){
+            	try{
+		            if(host.contains("--")){
+		            	hosts = new String[host.split("--").length];
+		            	int i=0;
+		            	for(String h:host.split("--")){
+		            		hosts[i]=h;
+		            		i++;
+		            	}
+		            }else{
+		            	hosts = new String[1];
+		            	hosts[0] = host;
+		            }
+		            
+		            Random rand = new Random();  
+		            
+		            currentHost = hosts[rand.nextInt( hosts.length)];
+		            logger.debug("Chosen seed : " + currentHost);
+		            socket = new TSocket(currentHost, port);
+		            transport = new TFramedTransport(socket);
+		            TProtocol protocol = new TBinaryProtocol(transport);
+		            client = new Cassandra.Client(protocol);
+		            socket.open();
+		            connected = true;
+            	}catch(Exception e){
+            		logger.error("Connexion impossible au serveur " + currentHost + " : " + e.toString());
+            		retries++;
+            	}
+	            
+            }
+            
+            cluster = client.describe_cluster_name();
+            List<TokenRange> ring =null;
+            boolean gotRing=false;
+            try{
+            	ring = client.describe_ring(currentKeyspace);
+            	gotRing=true;
+            }catch(Exception e){
+            	logger.warn("Couldn't get ring description for keyspace " + currentKeyspace + "... trying to connect to first host");
+            }
+            if(gotRing){
+	            int i = 0;
+	            for(TokenRange range:ring){
+	            	List<EndpointDetails> endpoints = range.getEndpoint_details();
+	            	for(EndpointDetails endpoint:endpoints){
+	            		if(!primaryDc.equals("")){
+	            			if(backupDc.equals(endpoint.getDatacenter())){
+	            				hostListBackup.add(endpoint.getHost());
+	            			}
+	            			if(primaryDc.equals(endpoint.getDatacenter())){
+	            				hostListPrimary.add(endpoint.getHost());
+	            			}
+	            		}else{
+	            			hostListPrimary.add(endpoint.getHost());
+	            		}
+	            	}
+	            }
+	
+	            socket.close();
+	            transport.close();
+	                                    
+	            logger.debug("Primary : " + hostListPrimary);
+	            logger.debug("Backup : " + hostListBackup);
+	            connected = tryToConnect(hostListPrimary,port,version,password,connectionRetries);
+	            if(!connected){
+	            	connected = tryToConnect(hostListBackup,port,version,password,connectionRetries);
+	            }
+	            if(!connected){
+	            	throw new SQLNonTransientConnectionException("All connections attempt have failed. Please check your JDBC url and server status.");
+	            }
+            }else{
+            	hostListPrimary.add(hosts[0]);
+            	connected = tryToConnect(hostListPrimary,port,version,password,connectionRetries);
+            }
+            
+            
+            
             decoder = new ColumnDecoder(client.describe_keyspaces());
                     
             if (currentKeyspace != null) client.set_keyspace(currentKeyspace);
