@@ -32,6 +32,8 @@ import java.util.Random;
 import java.util.Set;
 import java.util.TreeSet;
 import java.util.concurrent.ConcurrentSkipListSet;
+import java.util.regex.Matcher;
+import java.util.regex.Pattern;
 
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
@@ -135,86 +137,11 @@ class CassandraConnection extends AbstractConnection implements Connection
             defaultConsistencyLevel = ConsistencyLevel.valueOf(props.getProperty(TAG_CONSISTENCY_LEVEL,ConsistencyLevel.ONE.name()));
             boolean connected=false;            
             int retries=0;
-            // dealing with multiple hosts passed as seeds in the JDBC URL : jdbc:cassandra://lyn4e900.tlt--lyn4e901.tlt--lyn4e902.tlt:9160/fluks
-            // in this phase we get the list of all the nodes of the cluster
-            String currentHost ="";
-            while(!connected && retries<10){
-            	try{
-		            if(host.contains("--")){
-		            	hosts = new String[host.split("--").length];
-		            	int i=0;
-		            	for(String h:host.split("--")){
-		            		hosts[i]=h;
-		            		i++;
-		            	}
-		            }else{
-		            	hosts = new String[1];
-		            	hosts[0] = host;
-		            }
-		            
-		            Random rand = new Random();  
-		            
-		            currentHost = hosts[rand.nextInt( hosts.length)];
-		            logger.debug("Chosen seed : " + currentHost);
-		            socket = new TSocket(currentHost, port);
-		            transport = new TFramedTransport(socket);
-		            TProtocol protocol = new TBinaryProtocol(transport);
-		            client = new Cassandra.Client(protocol);
-		            socket.open();
-		            connected = true;
-            	}catch(Exception e){
-            		logger.error("Connexion impossible au serveur " + currentHost + " : " + e.toString());
-            		retries++;
-            	}
-	            
-            }
-            
-            cluster = client.describe_cluster_name();
-            List<TokenRange> ring =null;
-            boolean gotRing=false;
-            try{
-            	ring = client.describe_ring(currentKeyspace);
-            	gotRing=true;
-            }catch(Exception e){
-            	logger.warn("Couldn't get ring description for keyspace " + currentKeyspace + "... trying to connect to first host");
-            }
-            if(gotRing){
-	            int i = 0;
-	            for(TokenRange range:ring){
-	            	List<EndpointDetails> endpoints = range.getEndpoint_details();
-	            	for(EndpointDetails endpoint:endpoints){
-	            		if(!primaryDc.equals("")){
-	            			if(backupDc.equals(endpoint.getDatacenter())){
-	            				hostListBackup.add(endpoint.getHost());
-	            			}
-	            			if(primaryDc.equals(endpoint.getDatacenter())){
-	            				hostListPrimary.add(endpoint.getHost());
-	            			}
-	            		}else{
-	            			hostListPrimary.add(endpoint.getHost());
-	            		}
-	            	}
-	            }
-	
-	            socket.close();
-	            transport.close();
-	                                    
-	            logger.debug("Primary : " + hostListPrimary);
-	            logger.debug("Backup : " + hostListBackup);
-	            connected = tryToConnect(hostListPrimary,port,version,password,connectionRetries);
-	            if(!connected){
-	            	connected = tryToConnect(hostListBackup,port,version,password,connectionRetries);
-	            }
-	            if(!connected){
-	            	throw new SQLNonTransientConnectionException("All connections attempt have failed. Please check your JDBC url and server status.");
-	            }
-            }else{
-            	hostListPrimary.add(hosts[0]);
-            	connected = tryToConnect(hostListPrimary,port,version,password,connectionRetries);
-            }
-            
-            
-            
+
+            hostListPrimary.add(host);
+
+            connected = tryToConnect(hostListPrimary,port,version,password,connectionRetries);
+
             decoder = new ColumnDecoder(client.describe_keyspaces());
                     
             if (currentKeyspace != null) client.set_keyspace(currentKeyspace);
@@ -536,11 +463,12 @@ class CassandraConnection extends AbstractConnection implements Connection
     protected CqlResult execute(String queryStr, Compression compression, ConsistencyLevel consistencyLevel) throws InvalidRequestException, UnavailableException, TimedOutException, SchemaDisagreementException, TException
     {
         currentKeyspace = determineCurrentKeyspace(queryStr, currentKeyspace);
+    	String queryStrLimit = addLimit(queryStr);
 
         try
         {
-            if (majorCqlVersion==3) return client.execute_cql3_query(Utils.compressQuery(queryStr, compression), compression, consistencyLevel);
-            else                    return client.execute_cql_query(Utils.compressQuery(queryStr, compression), compression);
+            if (majorCqlVersion==3) return client.execute_cql3_query(Utils.compressQuery(queryStrLimit, compression), compression, consistencyLevel);
+            else                    return client.execute_cql_query(Utils.compressQuery(queryStrLimit, compression), compression);
         }
         catch (TException error)
         {
@@ -550,6 +478,24 @@ class CassandraConnection extends AbstractConnection implements Connection
         }
     }
 
+    private static final Pattern limitPattern = Pattern.compile("limit\\s+\\d+(\\s+allow\\s+filtering)?");
+    private static final Pattern allowFilteringPattern = Pattern.compile("\\sallow\\s+filtering");
+    private static final String LIMIT = " LIMIT 1000";
+    private String addLimit(String queryStr) {
+    	String lq = queryStr.toLowerCase();
+    	if (limitPattern.matcher(lq).find()) {
+    		// limit found nothing to do
+    		return queryStr;
+    	} else {
+    		Matcher m = allowFilteringPattern.matcher(lq);
+    		if (m.find()) {
+    			return queryStr.substring(0, m.start()) + LIMIT + queryStr.substring(m.start());
+    		} else {
+    			return queryStr + LIMIT;
+    		}
+    	}
+    }
+    
     /**
      * Execute a CQL query using the default compression methodology.
      *
@@ -586,10 +532,11 @@ class CassandraConnection extends AbstractConnection implements Connection
     
     protected CqlPreparedResult prepare(String queryStr, Compression compression)throws InvalidRequestException, TException
     {
+    	String queryStrLimit = addLimit(queryStr);
         try
         {
-            if (majorCqlVersion==3) return client.prepare_cql3_query(Utils.compressQuery(queryStr, compression), compression);
-            else                    return client.prepare_cql_query(Utils.compressQuery(queryStr, compression), compression);
+            if (majorCqlVersion==3) return client.prepare_cql3_query(Utils.compressQuery(queryStrLimit, compression), compression);
+            else                    return client.prepare_cql_query(Utils.compressQuery(queryStrLimit, compression), compression);
         }
         catch (TException error)
         {

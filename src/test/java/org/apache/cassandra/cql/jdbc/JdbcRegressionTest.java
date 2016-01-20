@@ -21,7 +21,6 @@
 package org.apache.cassandra.cql.jdbc;
 
 import static org.junit.Assert.*;
-import static org.mockito.Mockito.*;
 
 import java.sql.DatabaseMetaData;
 import java.sql.DriverManager;
